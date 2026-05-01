@@ -1,0 +1,33 @@
+# ── Core web framework ─────────────────────────────────────────────────────────
+flask
+flask-cors
+
+# ── Audio capture ──────────────────────────────────────────────────────────────
+sounddevice
+
+# ── Numerics / signal processing ──────────────────────────────────────────────
+numpy
+scipy
+
+# ── Noise reduction ────────────────────────────────────────────────────────────
+noisereduce
+
+# ── Voice Activity Detection ───────────────────────────────────────────────────
+# Primary: Silero VAD — loads via torch.hub (no separate install needed)
+# Fallback: webrtcvad-wheels (used automatically if Silero fails to load)
+webrtcvad-wheels
+
+# ── Speaker diarization ────────────────────────────────────────────────────────
+pyannote.audio
+torch
+torchaudio
+
+# ── Audio I/O ──────────────────────────────────────────────────────────────────
+soundfile
+librosa
+
+# ── HTTP client (pipeline → Flask) ────────────────────────────────────────────
+requests
+
+# ── Environment variables ──────────────────────────────────────────────────────
+python-dotenv

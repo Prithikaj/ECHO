@@ -1,0 +1,39 @@
+# ── Secrets — never commit these ──────────────────────────────────────────────
+.env
+*.env
+.env.*
+!.env.example
+
+# ── Recordings (large binary files) ───────────────────────────────────────────
+recordings/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── PyTorch / model cache ──────────────────────────────────────────────────────
+*.pt
+*.pth
+*.ckpt
+*.bin
+hub/
+
+# ── IDE / OS ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

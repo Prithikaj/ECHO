@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ECHO — Real-Time Audio Monitor</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">
+      <span class="logo-icon">🎙</span>
+      <span class="logo-text">ECHO</span>
+    </div>
+    <div class="header-meta">Real-Time Audio Streaming &amp; Speaker Diarization</div>
+  </header>
+
+  <!-- ── Status Bar ─────────────────────────────────────────────────────────── -->
+  <section class="status-bar">
+    <div class="status-pill" id="mic-status">
+      <span class="dot" id="mic-dot"></span>
+      <span id="mic-label">Idle</span>
+    </div>
+
+    <div class="status-pill">
+      <span class="label">Chunks</span>
+      <span class="value" id="stat-chunks">0</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">Speech</span>
+      <span class="value" id="stat-speech">0</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">Silence</span>
+      <span class="value" id="stat-silence">0</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">Avg Latency</span>
+      <span class="value" id="stat-latency">—</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">Channels</span>
+      <span class="value" id="stat-channels">—</span>
+    </div>
+
+    <div class="status-pill" id="storage-pill" title="Recordings saved to disk">
+      <span class="label">💾 Saved</span>
+      <span class="value" id="stat-saved">0</span>
+    </div>
+
+    <div class="controls">
+      <button id="btn-start" class="btn btn-start">▶ Start</button>
+      <button id="btn-stop"  class="btn btn-stop" disabled>■ Stop</button>
+    </div>
+  </section>
+
+  <!-- ── Main Grid ──────────────────────────────────────────────────────────── -->
+  <main class="grid">
+
+    <!-- Waveform -->
+    <section class="card waveform-card">
+      <h2>Waveform</h2>
+      <canvas id="waveform-canvas"></canvas>
+    </section>
+
+    <!-- Speaker Activity -->
+    <section class="card speakers-card">
+      <h2>Speaker Activity</h2>
+      <div class="speaker-row" id="speaker-1-row">
+        <div class="speaker-label">Speaker 1</div>
+        <div class="speaker-bar-wrap">
+          <div class="speaker-bar" id="speaker-1-bar"></div>
+        </div>
+        <div class="speaker-time" id="speaker-1-time">0.0 s</div>
+      </div>
+      <div class="speaker-row" id="speaker-2-row">
+        <div class="speaker-label">Speaker 2</div>
+        <div class="speaker-bar-wrap">
+          <div class="speaker-bar" id="speaker-2-bar"></div>
+        </div>
+        <div class="speaker-time" id="speaker-2-time">0.0 s</div>
+      </div>
+    </section>
+
+    <!-- Timeline -->
+    <section class="card timeline-card">
+      <h2>Chunk Timeline</h2>
+      <div id="timeline"></div>
+    </section>
+
+    <!-- Event Log -->
+    <section class="card log-card">
+      <h2>Speaker Event Log</h2>
+      <div id="event-log"></div>
+    </section>
+
+    <!-- Storage Info -->
+    <section class="card storage-card">
+      <h2>💾 Saved Recordings</h2>
+      <div id="storage-info">
+        <p class="storage-idle">No active session yet.</p>
+      </div>
+      <a id="recordings-link" href="/recordings" target="_blank" class="btn btn-recordings" style="display:none">
+        Browse All Sessions →
+      </a>
+    </section>
+
+  </main>
+
+  <!-- ── Latency Chart ──────────────────────────────────────────────────────── -->
+  <section class="card latency-card">
+    <h2>Latency (ms)</h2>
+    <canvas id="latency-canvas"></canvas>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
