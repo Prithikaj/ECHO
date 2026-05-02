@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ECHO — Real-Time Audio Monitor</title>
+  <title>ECHO — AI Emergency Call Intelligence</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -13,9 +13,28 @@
     <div class="logo">
       <span class="logo-icon">🎙</span>
       <span class="logo-text">ECHO</span>
+      <span class="logo-sub">AI Emergency Call Intelligence</span>
     </div>
-    <div class="header-meta">Real-Time Audio Streaming &amp; Speaker Diarization</div>
+    <div class="header-right">
+      <div class="ai-badge">
+        <span class="ai-dot"></span>
+        <span>Gemini 2.5 Flash</span>
+      </div>
+      <div class="controls">
+        <button id="btn-start" class="btn btn-start">▶ Start</button>
+        <button id="btn-stop"  class="btn btn-stop" disabled>■ Stop</button>
+      </div>
+    </div>
   </header>
+
+  <!-- ── Crisis Banner (hidden by default) ──────────────────────────────────── -->
+  <div id="crisis-banner" class="crisis-banner hidden">
+    <span class="crisis-icon">🚨</span>
+    <span id="crisis-text">CRISIS DETECTED</span>
+    <span id="crisis-type-badge" class="crisis-type-badge"></span>
+    <span id="crisis-escalation" class="crisis-escalation"></span>
+    <button id="crisis-dismiss" class="crisis-dismiss">✕</button>
+  </div>
 
   <!-- ── Status Bar ─────────────────────────────────────────────────────────── -->
   <section class="status-bar">
@@ -23,7 +42,6 @@
       <span class="dot" id="mic-dot"></span>
       <span id="mic-label">Idle</span>
     </div>
-
     <div class="status-pill">
       <span class="label">Chunks</span>
       <span class="value" id="stat-chunks">0</span>
@@ -41,78 +59,201 @@
       <span class="value" id="stat-latency">—</span>
     </div>
     <div class="status-pill">
+      <span class="label">AI Latency</span>
+      <span class="value" id="stat-ai-latency">—</span>
+    </div>
+    <div class="status-pill">
+      <span class="label">Language</span>
+      <span class="value" id="stat-language">—</span>
+    </div>
+    <div class="status-pill">
       <span class="label">Channels</span>
       <span class="value" id="stat-channels">—</span>
     </div>
-
-    <div class="status-pill" id="storage-pill" title="Recordings saved to disk">
+    <div class="status-pill" title="Recordings saved to disk">
       <span class="label">💾 Saved</span>
       <span class="value" id="stat-saved">0</span>
-    </div>
-
-    <div class="controls">
-      <button id="btn-start" class="btn btn-start">▶ Start</button>
-      <button id="btn-stop"  class="btn btn-stop" disabled>■ Stop</button>
     </div>
   </section>
 
   <!-- ── Main Grid ──────────────────────────────────────────────────────────── -->
   <main class="grid">
 
-    <!-- Waveform -->
-    <section class="card waveform-card">
-      <h2>Waveform</h2>
-      <canvas id="waveform-canvas"></canvas>
-    </section>
+    <!-- ── Col 1: Waveform + Transcription ──────────────────────────────────── -->
+    <div class="col col-left">
 
-    <!-- Speaker Activity -->
-    <section class="card speakers-card">
-      <h2>Speaker Activity</h2>
-      <div class="speaker-row" id="speaker-1-row">
-        <div class="speaker-label">Speaker 1</div>
-        <div class="speaker-bar-wrap">
-          <div class="speaker-bar" id="speaker-1-bar"></div>
+      <!-- Waveform -->
+      <section class="card waveform-card">
+        <h2>🎙 Live Waveform</h2>
+        <canvas id="waveform-canvas"></canvas>
+      </section>
+
+      <!-- Live Transcription -->
+      <section class="card transcript-card">
+        <div class="card-header">
+          <h2>📝 Live Transcription</h2>
+          <div class="transcript-meta">
+            <span class="lang-badge" id="lang-badge">—</span>
+            <span class="conf-badge" id="conf-badge">—</span>
+          </div>
         </div>
-        <div class="speaker-time" id="speaker-1-time">0.0 s</div>
-      </div>
-      <div class="speaker-row" id="speaker-2-row">
-        <div class="speaker-label">Speaker 2</div>
-        <div class="speaker-bar-wrap">
-          <div class="speaker-bar" id="speaker-2-bar"></div>
+        <div id="transcript-feed"></div>
+        <div id="dialect-note" class="dialect-note hidden"></div>
+      </section>
+
+      <!-- Verification Loop -->
+      <section class="card verification-card">
+        <h2>🔁 Verification Loop</h2>
+        <div id="verification-box">
+          <p class="idle-text">Waiting for speech…</p>
         </div>
-        <div class="speaker-time" id="speaker-2-time">0.0 s</div>
-      </div>
-    </section>
+      </section>
 
-    <!-- Timeline -->
-    <section class="card timeline-card">
-      <h2>Chunk Timeline</h2>
-      <div id="timeline"></div>
-    </section>
+    </div>
 
-    <!-- Event Log -->
-    <section class="card log-card">
-      <h2>Speaker Event Log</h2>
-      <div id="event-log"></div>
-    </section>
+    <!-- ── Col 2: Emotion + Intent ───────────────────────────────────────────── -->
+    <div class="col col-mid">
 
-    <!-- Storage Info -->
-    <section class="card storage-card">
-      <h2>💾 Saved Recordings</h2>
-      <div id="storage-info">
-        <p class="storage-idle">No active session yet.</p>
-      </div>
-      <a id="recordings-link" href="/recordings" target="_blank" class="btn btn-recordings" style="display:none">
-        Browse All Sessions →
-      </a>
-    </section>
+      <!-- Emotion Panel -->
+      <section class="card emotion-card">
+        <h2>❤️ Emotion & Sentiment</h2>
+        <div class="emotion-main">
+          <div class="emotion-icon" id="emotion-icon">😐</div>
+          <div class="emotion-details">
+            <div class="emotion-label" id="emotion-label">Neutral</div>
+            <div class="urgency-row">
+              <span class="urgency-label">Urgency</span>
+              <div class="urgency-bar-wrap">
+                <div class="urgency-bar" id="urgency-bar"></div>
+              </div>
+              <span class="urgency-value" id="urgency-value">0%</span>
+            </div>
+            <div class="emotion-meta">
+              <span class="sentiment-badge" id="sentiment-badge">neutral</span>
+              <span class="trajectory-badge" id="trajectory-badge">stable</span>
+            </div>
+          </div>
+        </div>
+        <div id="implicit-meaning" class="implicit-meaning hidden"></div>
+        <canvas id="emotion-chart" height="60"></canvas>
+      </section>
+
+      <!-- Intent Panel -->
+      <section class="card intent-card">
+        <h2>🎯 Intent & Entities</h2>
+        <div class="intent-main">
+          <div class="intent-badge-wrap">
+            <span class="intent-badge" id="intent-badge">—</span>
+            <span class="risk-badge" id="risk-badge">low</span>
+          </div>
+          <div class="intent-conf" id="intent-conf">Confidence: —</div>
+        </div>
+        <div id="entities-grid" class="entities-grid"></div>
+        <div id="missing-info" class="missing-info hidden"></div>
+      </section>
+
+      <!-- Speaker Activity -->
+      <section class="card speakers-card">
+        <h2>🗣️ Speaker Activity</h2>
+        <div class="speaker-row" id="speaker-1-row">
+          <div class="speaker-label">Speaker 1</div>
+          <div class="speaker-bar-wrap">
+            <div class="speaker-bar" id="speaker-1-bar"></div>
+          </div>
+          <div class="speaker-time" id="speaker-1-time">0.0 s</div>
+        </div>
+        <div class="speaker-row" id="speaker-2-row">
+          <div class="speaker-label">Speaker 2</div>
+          <div class="speaker-bar-wrap">
+            <div class="speaker-bar" id="speaker-2-bar"></div>
+          </div>
+          <div class="speaker-time" id="speaker-2-time">0.0 s</div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ── Col 3: Dashboard + Log ────────────────────────────────────────────── -->
+    <div class="col col-right">
+
+      <!-- Human-in-the-Loop Dashboard -->
+      <section class="card dashboard-card">
+        <h2>👩‍💻 Agent Dashboard</h2>
+        <div class="dashboard-grid">
+          <div class="dash-item">
+            <div class="dash-label">Risk Level</div>
+            <div class="dash-value risk-value" id="dash-risk">—</div>
+          </div>
+          <div class="dash-item">
+            <div class="dash-label">Crisis</div>
+            <div class="dash-value" id="dash-crisis">None</div>
+          </div>
+          <div class="dash-item">
+            <div class="dash-label">Escalation</div>
+            <div class="dash-value" id="dash-escalation">—</div>
+          </div>
+          <div class="dash-item">
+            <div class="dash-label">Language</div>
+            <div class="dash-value" id="dash-language">—</div>
+          </div>
+          <div class="dash-item">
+            <div class="dash-label">Transcriptions</div>
+            <div class="dash-value" id="dash-transcriptions">0</div>
+          </div>
+          <div class="dash-item">
+            <div class="dash-label">Turns</div>
+            <div class="dash-value" id="dash-turns">0</div>
+          </div>
+        </div>
+        <div class="agent-override">
+          <button class="btn btn-override" id="btn-override">⚡ Override to Human Agent</button>
+        </div>
+      </section>
+
+      <!-- TTS Response -->
+      <section class="card tts-card">
+        <h2>🌐 AI Voice Response</h2>
+        <div id="tts-box">
+          <p class="idle-text">No response generated yet.</p>
+        </div>
+      </section>
+
+      <!-- Event Log -->
+      <section class="card log-card">
+        <h2>📋 Event Log</h2>
+        <div id="event-log"></div>
+      </section>
+
+    </div>
 
   </main>
 
-  <!-- ── Latency Chart ──────────────────────────────────────────────────────── -->
-  <section class="card latency-card">
-    <h2>Latency (ms)</h2>
-    <canvas id="latency-canvas"></canvas>
+  <!-- ── Bottom Row ─────────────────────────────────────────────────────────── -->
+  <div class="bottom-row">
+
+    <!-- Timeline -->
+    <section class="card timeline-card">
+      <h2>⏱ Chunk Timeline</h2>
+      <div id="timeline"></div>
+    </section>
+
+    <!-- Latency Chart -->
+    <section class="card latency-card">
+      <h2>📊 Latency (ms)</h2>
+      <canvas id="latency-canvas"></canvas>
+    </section>
+
+  </div>
+
+  <!-- ── Storage Card ───────────────────────────────────────────────────────── -->
+  <section class="card storage-card">
+    <h2>💾 Saved Recordings</h2>
+    <div id="storage-info">
+      <p class="storage-idle">No active session yet.</p>
+    </div>
+    <a id="recordings-link" href="/recordings" target="_blank" class="btn btn-recordings" style="display:none">
+      Browse All Sessions →
+    </a>
   </section>
 
   <script src="app.js"></script>
