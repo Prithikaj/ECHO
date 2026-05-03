@@ -60,10 +60,11 @@ class Timer:
 
 
 # ── Audio quality assessment ───────────────────────────────────────────────────
-def assess_quality(audio: np.ndarray, threshold: float = 0.02) -> str:
+def assess_quality(audio: np.ndarray, threshold: float = 0.005) -> str:
     """
     Rough quality label based on RMS energy variance.
     Returns 'clean' or 'noisy'.
+    Threshold lowered to 0.005 — post-noise-reduction audio has lower RMS.
     """
     rms = float(np.sqrt(np.mean(audio ** 2)))
     return "clean" if rms >= threshold else "noisy"

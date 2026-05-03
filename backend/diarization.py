@@ -36,10 +36,17 @@ def _load_pipeline():
     try:
         from pyannote.audio import Pipeline
         logger.info("Loading pyannote speaker-diarization pipeline…")
-        _pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token,
-        )
+        try:
+            # New pyannote versions use 'token' instead of 'use_auth_token'
+            _pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=hf_token,
+            )
+        except TypeError:
+            _pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=hf_token,
+            )
         logger.info("pyannote pipeline loaded successfully.")
     except Exception as exc:
         logger.warning(f"Failed to load pyannote pipeline: {exc}. Using fallback.")

@@ -1,11 +1,14 @@
-﻿/**
+/**
  * ECHO Frontend - AI Emergency Call Intelligence Dashboard
  * Gemini 2.5 Flash powered: transcription, language detection,
  * emotion analysis, intent classification, crisis detection,
  * verification loop, TTS responses, human-in-the-loop dashboard.
  */
 
-const API_BASE = 'http://127.0.0.1:5000';
+/** Same host as the Flask app when served over HTTP; fallback if opening file:// */
+const API_BASE = (window.location.protocol === 'http:' || window.location.protocol === 'https:')
+  ? window.location.origin
+  : 'http://127.0.0.1:5000';
 
 // State
 const state = {
@@ -26,7 +29,58 @@ const state = {
   currentUrgency: 0,
   currentIntent: null,
   lastChannels: '-',
+  _lastDisplayedTranscript: '',
+  /** debounce id for Chrome speechSynthesis (cancel + speak must be async) */
+  _ttsSchedule: null,
 };
+
+/** Prime voice list (Chrome loads voices asynchronously). */
+function loadVoices() {
+  if (!window.speechSynthesis) return [];
+  return window.speechSynthesis.getVoices();
+}
+
+/**
+ * Pick a SpeechSynthesis voice using a fresh getVoices() call (required on Windows/Chrome).
+ */
+function pickVoiceForLanguage(langKey) {
+  const voices = loadVoices();
+  if (!voices || !voices.length) return null;
+  const norm = function (v) {
+    return (v.lang || '').toLowerCase().replace(/_/g, '-');
+  };
+  const key = (langKey || 'english').toLowerCase();
+  const byPrefix = function (prefixes) {
+    for (var i = 0; i < prefixes.length; i++) {
+      var p = prefixes[i].toLowerCase();
+      var found = voices.find(function (v) {
+        var l = norm(v);
+        return l.startsWith(p) || (p.length <= 2 && l.split(/[-_]/)[0] === p);
+      });
+      if (found) return found;
+    }
+    return null;
+  };
+  if (key === 'hindi' || key === 'code_mixed') {
+    var hv = byPrefix(['hi-in', 'hi']);
+    if (hv) return hv;
+    hv = voices.find(function (x) {
+      return /hindi|hemant|kalpana|swara|sapna|microsoft.*hi/i.test(x.name);
+    });
+    if (hv) return hv;
+  }
+  if (key === 'kannada') {
+    var kv = byPrefix(['kn-in', 'kn']);
+    if (kv) return kv;
+    kv = voices.find(function (x) { return /kannada/i.test(x.name); });
+    if (kv) return kv;
+  }
+  if (key === 'english') {
+    var ev = byPrefix(['en-in', 'en-gb', 'en-us', 'en']);
+    if (ev) return ev;
+  }
+  return voices[0] || null;
+}
 
 const EMO_EMOJI = { fear:'😨', panic:'😰', anger:'😡', confusion:'😕', calm:'😌', distress:'😢', sadness:'😔', neutral:'😐' };
 const EMO_COLOR = { fear:'#f7c948', panic:'#f76f6f', anger:'#f79a4f', confusion:'#a259ff', calm:'#3ecf8e', distress:'#f76f6f', sadness:'#4f8ef7', neutral:'#7a8499' };
@@ -98,6 +152,10 @@ function resizeCanvases() {
 }
 window.addEventListener('resize', resizeCanvases);
 resizeCanvases();
+if (window.speechSynthesis) {
+  loadVoices();
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+}
 
 // Mic status
 function setMicStatus(status) {
@@ -130,10 +188,57 @@ async function stopPipeline() {
     btnStart.disabled = false;
     btnStop.disabled  = true;
     setMicStatus('idle');
-    appendLog('sys', 'Pipeline stopped');
-    if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+    appendLog('sys', 'Pipeline stopped — waiting for final AI results...');
+    // Keep SSE open for 30 seconds to catch late-arriving AI results
+    setTimeout(() => {
+      if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+      appendLog('sys', 'Session complete');
+    }, 30000);
     if (data.post_call_summary) showPostCallSummary(data.post_call_summary);
+    // Also poll /status once after 5s and 15s to catch any missed chunks
+    setTimeout(() => fetchAndDisplayLatestChunks(), 5000);
+    setTimeout(() => fetchAndDisplayLatestChunks(), 15000);
+    setTimeout(() => fetchAndDisplayLatestChunks(), 25000);
   } catch (err) { appendLog('sys', 'Could not stop: ' + err.message); }
+}
+
+async function fetchAndDisplayLatestChunks() {
+  try {
+    var res = await fetch(API_BASE + '/status');
+    var data = await res.json();
+    var chunks = data.recent_chunks || [];
+    if (chunks.length === 0) return;
+    var latest = chunks[chunks.length - 1];
+    // Only display if it has AI data we haven't shown yet
+    if (latest.transcript && latest.transcript !== state._lastDisplayedTranscript) {
+      state._lastDisplayedTranscript = latest.transcript;
+      updateTranscription(
+        latest.speaker || 'Speaker 1',
+        latest.transcript,
+        latest.normalized_text || latest.transcript,
+        latest.language,
+        latest.transcription_confidence,
+        latest.is_code_mixed,
+        latest.dialect_notes
+      );
+      if (latest.language) {
+        var langDisplay = latest.language.replace('_', ' ').toUpperCase();
+        statLanguage.textContent = langDisplay;
+        langBadge.textContent = langDisplay;
+        dashLanguage.textContent = langDisplay;
+      }
+      if (latest.emotion) updateEmotionPanel(latest.emotion, latest.emotion_confidence, latest.urgency_level, latest.urgency_score, latest.sentiment, latest.emotion_trajectory, latest.implicit_meaning);
+      if (latest.intent) updateIntentPanel(latest.intent, latest.intent_confidence, latest.entities, latest.risk_level, latest.missing_critical_info);
+      if (latest.crisis_activated) triggerCrisisMode(latest.crisis_type, latest.crisis_severity, latest.escalation_path, latest.bypass_ai);
+      if (latest.verification_action) updateVerification(latest.verification_action, latest.verification_statement, latest.clarification_question);
+      if (latest.tts_text) updateTTS(latest.tts_text, latest.tts_tone, latest.tts_language || latest.language);
+      updateDashboard(latest.risk_level, latest.crisis_activated, latest.crisis_type, latest.escalation_path, latest.conversation_context);
+      addTimelineItem(latest.start_time, latest.end_time, latest.speaker, latest.quality, latest.latency, latest.language, latest.emotion);
+      appendLog(latest.speaker === 'Speaker 1' ? 's1' : 's2', latest.speaker + ': ' + latest.transcript.substring(0, 80));
+      state.transcriptionCount++;
+      dashTranscriptions.textContent = state.transcriptionCount;
+    }
+  } catch(e) {}
 }
 
 btnStart.addEventListener('click', startPipeline);
@@ -142,6 +247,28 @@ document.getElementById('btn-override').addEventListener('click', () => {
   appendLog('crisis', 'AGENT OVERRIDE — transferring to human agent');
   alert('Transferring call to human agent...');
 });
+
+document.getElementById('btn-connect-human').addEventListener('click', async () => {
+  try {
+    const res = await fetch(API_BASE + '/connect_human', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: null }),
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      appendLog('crisis', 'Human professional connected — ' + (data.details || 'notification sent'));
+      alert('Human professional has been alerted.');
+    } else {
+      appendLog('sys', 'Human connection failed: ' + (data.reason || JSON.stringify(data)));
+      alert('Could not connect human professional. See log for details.');
+    }
+  } catch (err) {
+    appendLog('sys', 'Human connection request failed: ' + err.message);
+    alert('Connection request failed.');
+  }
+});
+
 document.getElementById('crisis-dismiss').addEventListener('click', () => {
   crisisbanner.classList.add('hidden');
 });
@@ -167,6 +294,13 @@ function handleEvent(event) {
     handleCrisisAlert(event);
     return;
   }
+  if (event.type === 'human_connection') {
+    appendLog('human', 'Human professional requested: ' + (event.message || 'notification sent'));
+    if (event.success === false) {
+      appendLog('sys', 'Human professional connection failed: ' + (event.reason || 'unknown'));
+    }
+    return;
+  }
   if (event.type === 'post_call_summary') {
     showPostCallSummary(event.summary);
     return;
@@ -188,7 +322,7 @@ function processChunk(chunk) {
     intent, intent_confidence, entities, risk_level, requires_immediate_action, missing_critical_info,
     crisis_activated, crisis_type, crisis_severity, bypass_ai, escalation_path,
     verification_action, verification_statement, clarification_question,
-    tts_text, tts_tone, tts_language,
+    tts_text, tts_tone, tts_language, assistant_response,
     conversation_context, ai_latency
   } = chunk;
 
@@ -227,14 +361,23 @@ function processChunk(chunk) {
   // AI: Transcription
   if (transcript) {
     state.transcriptionCount++;
+    state._lastDisplayedTranscript = transcript;
     updateTranscription(speaker, transcript, normalized_text, language, transcription_confidence, is_code_mixed, dialect_notes);
     dashTranscriptions.textContent = state.transcriptionCount;
   }
 
   // AI: Language
-  if (language && language !== 'unknown') {
+  if (language) {
     state.currentLanguage = language;
-    const langDisplay = language.replace('_', ' ').toUpperCase();
+    // Display primary language prominently (not 'CODE MIXED')
+    const langMap = {
+      'hindi': 'HINDI',
+      'kannada': 'KANNADA',
+      'english': 'ENGLISH',
+      'code_mixed': 'CODE MIXED (HINDI)',
+      'unknown': 'UNKNOWN'
+    };
+    const langDisplay = langMap[language] || language.replace('_', ' ').toUpperCase();
     statLanguage.textContent = langDisplay;
     langBadge.textContent = langDisplay;
     dashLanguage.textContent = langDisplay;
@@ -253,10 +396,15 @@ function processChunk(chunk) {
     drawEmotionChart();
   }
 
-  // AI: Intent
+  // AI: Intent + Risk
   if (intent) {
     state.currentIntent = intent;
     updateIntentPanel(intent, intent_confidence, entities, risk_level, missing_critical_info);
+    // Also update dashboard risk immediately when received
+    if (risk_level && dashRisk) {
+      dashRisk.textContent = risk_level.toUpperCase();
+      dashRisk.className = 'dash-value risk-value ' + risk_level.toLowerCase();
+    }
   }
 
   // AI: Crisis
@@ -271,10 +419,17 @@ function processChunk(chunk) {
   }
 
   // AI: TTS
-  if (tts_text) updateTTS(tts_text, tts_tone, tts_language || language);
+  if (tts_text) {
+    updateTTS(tts_text, tts_tone || 'calm', tts_language || language);
+  } else if (assistant_response) {
+    updateTTS(assistant_response, 'calm', language);
+  } else if (transcript && verification_statement) {
+    // Fallback: speak the verification statement
+    updateTTS(verification_statement, 'calm', language);
+  }
 
-  // Dashboard
-  updateDashboard(risk_level, crisis_activated, crisis_type, escalation_path, conversation_context);
+  // Dashboard (always pass a string risk so the agent panel is never blank)
+  updateDashboard(risk_level || 'low', crisis_activated, crisis_type, escalation_path, conversation_context);
 
   // Event log
   const cls = speaker === 'Speaker 1' ? 's1' : 's2';
@@ -282,7 +437,7 @@ function processChunk(chunk) {
   if (transcript) logMsg += ': ' + transcript.substring(0, 60) + (transcript.length > 60 ? '...' : '');
   else logMsg += ' (no transcript)';
   appendLog(cls, logMsg);
-  if (emotion) appendLog('ai', '  emotion=' + emotion + ' urgency=' + (urgency_level||'?') + ' intent=' + (intent||'?'));
+  if (emotion) appendLog('ai', '  emotion=' + emotion + ' urgency=' + (urgency_level||'?') + ' intent=' + (intent||'?') + ' risk=' + (risk_level||'?'));
 }
 
 // Update transcription feed
@@ -376,44 +531,122 @@ function updateVerification(action, statement, question) {
   verificationBox.appendChild(div);
 }
 
-// TTS response
+// TTS response (SpeechSynthesis — use DOM button + deferred speak for Hindi/Windows Chrome)
 function updateTTS(text, tone, language) {
-  const div = document.createElement('div');
-  div.className = 'tts-item';
-  div.innerHTML = '<div class="tts-lang">' + (language || 'en').toUpperCase() + ' &bull; tone: ' + (tone || 'calm') + '</div>' +
-    '<div class="tts-text">' + text + '</div>';
+  var raw = String(text || '').trim();
+  if (!raw) return;
+  var lang = (language || 'english').toLowerCase();
+  var t = tone || 'calm';
   ttsBox.innerHTML = '';
-  ttsBox.appendChild(div);
+  var wrap = document.createElement('div');
+  wrap.className = 'tts-item';
+  var hdr = document.createElement('div');
+  hdr.className = 'tts-lang';
+  hdr.textContent = lang.toUpperCase() + ' • tone: ' + t;
+  var body = document.createElement('div');
+  body.className = 'tts-text';
+  body.textContent = raw;
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-speak';
+  btn.textContent = '🔊 Speak';
+  btn.addEventListener('click', function () { speakText(raw, lang, t); });
+  wrap.appendChild(hdr);
+  wrap.appendChild(body);
+  wrap.appendChild(btn);
+  ttsBox.appendChild(wrap);
+  speakText(raw, lang, t);
 }
+
+function speakText(text, language, tone) {
+  if (!window.speechSynthesis) {
+    appendLog('sys', 'TTS not supported in this browser');
+    return;
+  }
+  var raw = String(text || '').trim();
+  if (!raw) return;
+  loadVoices();
+  var synth = window.speechSynthesis;
+  synth.cancel();
+  if (state._ttsSchedule) {
+    window.clearTimeout(state._ttsSchedule);
+    state._ttsSchedule = null;
+  }
+  var langKey = (language || 'english').toLowerCase();
+  var toneVal = (tone || 'calm').toLowerCase();
+  state._ttsSchedule = window.setTimeout(function () {
+    state._ttsSchedule = null;
+    loadVoices();
+    try { synth.resume(); } catch (e) {}
+    var utter = new SpeechSynthesisUtterance(raw);
+    var langMap = { hindi: 'hi-IN', kannada: 'kn-IN', english: 'en-IN', code_mixed: 'hi-IN', unknown: 'en-IN' };
+    utter.lang = langMap[langKey] || 'en-IN';
+    var voice = pickVoiceForLanguage(langKey);
+    if (voice) utter.voice = voice;
+    if (toneVal === 'urgent' || toneVal === 'fast') { utter.rate = 1.12; utter.pitch = 1.05; }
+    else if (toneVal === 'calm' || toneVal === 'slow') { utter.rate = 0.92; utter.pitch = 1.0; }
+    else if (toneVal === 'empathetic' || toneVal === 'reassuring') { utter.rate = 0.92; utter.pitch = 1.0; }
+    else { utter.rate = 1.0; utter.pitch = 1.0; }
+    utter.volume = 1.0;
+    utter.onstart = function () {
+      appendLog('ai', 'TTS started (' + utter.lang + (voice ? ', ' + voice.name : '') + ')');
+    };
+    utter.onend = function () { appendLog('ai', 'TTS finished'); };
+    utter.onerror = function (e) {
+      appendLog('sys', 'TTS error: ' + (e && e.error ? e.error : 'unknown') + ' — try the Speak button or check Windows speech voices');
+    };
+    try {
+      synth.speak(utter);
+    } catch (err) {
+      appendLog('sys', 'TTS speak() failed: ' + err);
+    }
+    appendLog('ai', 'Speaking: ' + raw.substring(0, 80) + (raw.length > 80 ? '...' : ''));
+  }, 150);
+}
+
+window.speakText = speakText;
 
 // Agent dashboard
 function updateDashboard(riskLevel, crisisActivated, crisisType, escalationPath, ctx) {
-  dashRisk.textContent = riskLevel || '-';
-  dashRisk.className = 'dash-value risk-value ' + (riskLevel || 'low');
+  var rl = (riskLevel != null && riskLevel !== '') ? String(riskLevel) : 'low';
+  dashRisk.textContent = rl.toUpperCase();
+  dashRisk.className = 'dash-value risk-value ' + rl.toLowerCase().replace(/\s+/g, '');
   if (!crisisActivated) {
     dashCrisis.textContent = 'None';
     dashCrisis.style.color = '';
   }
-  dashEscalation.textContent = escalationPath ? escalationPath.replace(/_/g,' ') : '-';
+  if (escalationPath) dashEscalation.textContent = escalationPath.replace(/_/g,' ');
   if (ctx) {
-    if (ctx.total_turns) dashTurns.textContent = ctx.total_turns;
+    if (ctx.total_turns !== undefined) dashTurns.textContent = ctx.total_turns;
+    if (ctx.languages_detected && ctx.languages_detected.length > 0) {
+      dashLanguage.textContent = ctx.languages_detected.join(', ').toUpperCase();
+    }
   }
 }
 
 // Post-call summary
 function showPostCallSummary(summary) {
-  if (!summary || !summary.summary) return;
-  appendLog('sys', '--- POST-CALL SUMMARY ---');
-  appendLog('sys', summary.summary);
-  if (summary.risk_assessment) appendLog('sys', 'Risk: ' + summary.risk_assessment);
-  if (summary.case_category)   appendLog('sys', 'Category: ' + summary.case_category);
-  if (summary.follow_up_required) appendLog('sys', 'Follow-up required: ' + (summary.follow_up_notes || 'yes'));
+  if (!summary) return;
+  appendLog('sys', '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  appendLog('sys', '📋 POST-CALL SUMMARY');
+  appendLog('sys', '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  if (summary.summary) appendLog('sys', '📝 ' + summary.summary);
+  if (summary.issue) appendLog('sys', '🎯 Issue: ' + summary.issue);
+  if (summary.primary_emotion_overall) appendLog('sys', '❤️ Primary emotion: ' + summary.primary_emotion_overall);
+  if (summary.case_category) appendLog('sys', '📂 Category: ' + summary.case_category);
+  if (summary.risk_assessment) appendLog('sys', '⚠️ Risk level: ' + summary.risk_assessment);
+  if (summary.actions_taken && summary.actions_taken.length) appendLog('sys', '✅ Actions: ' + summary.actions_taken.join(', '));
+  if (summary.follow_up_required) appendLog('sys', '🔔 Follow-up required: ' + (summary.follow_up_notes || 'Yes'));
+  if (summary.languages_used && summary.languages_used.length) appendLog('sys', '🗣️ Languages: ' + summary.languages_used.join(', '));
+  appendLog('sys', '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 }
 
 // Crisis alert event
 function handleCrisisAlert(event) {
   triggerCrisisMode(event.crisis_type, event.crisis_severity, event.escalation_path, event.bypass_ai);
-  if (event.immediate_response) updateTTS(event.immediate_response, 'urgent', 'en');
+  if (event.immediate_response) {
+    updateTTS(event.immediate_response, 'urgent', event.tts_language || state.currentLanguage || 'english');
+  }
 }
 
 
@@ -453,15 +686,47 @@ function appendLog(cls, text) {
   while (eventLog.children.length > 150) eventLog.lastChild.remove();
 }
 
-// Waveform
+// Waveform — continuous animation loop
+var waveAnimFrame = null;
+var waveActive = false;
+
+function startWaveformAnimation() {
+  waveActive = true;
+  function animate() {
+    if (!waveActive) return;
+    var w = waveCanvas.width, h = waveCanvas.height, mid = h / 2;
+    var img = wCtx.getImageData(2, 0, w - 2, h);
+    wCtx.putImageData(img, 0, 0);
+    wCtx.clearRect(w - 2, 0, 2, h);
+    if (state.running) {
+      var color = URGENCY_COLOR(state.currentUrgency);
+      var amp = (0.15 + Math.random() * 0.7) * mid;
+      wCtx.fillStyle = color;
+      wCtx.globalAlpha = 0.5 + Math.random() * 0.5;
+      wCtx.fillRect(w - 2, mid - amp, 2, amp * 2);
+      wCtx.globalAlpha = 1.0;
+    } else {
+      wCtx.fillStyle = '#3a3f4b';
+      wCtx.fillRect(w - 2, mid - 1, 2, 2);
+    }
+    waveAnimFrame = requestAnimationFrame(animate);
+  }
+  animate();
+}
+
+function stopWaveformAnimation() {
+  waveActive = false;
+  if (waveAnimFrame) cancelAnimationFrame(waveAnimFrame);
+}
+
+// Start animation immediately
+startWaveformAnimation();
+
 function drawWaveform(quality, latency) {
-  var w = waveCanvas.width, h = waveCanvas.height, mid = h/2;
-  var img = wCtx.getImageData(2,0,w-2,h);
-  wCtx.putImageData(img,0,0);
-  wCtx.clearRect(w-2,0,2,h);
-  var amp = quality==='clean' ? (0.3+Math.random()*0.5)*mid : (0.05+Math.random()*0.15)*mid;
-  wCtx.fillStyle = quality==='clean' ? URGENCY_COLOR(state.currentUrgency) : '#7a8499';
-  wCtx.fillRect(w-2, mid-amp, 2, amp*2);
+  // Boost amplitude on speech chunks
+  if (quality === 'clean') {
+    state.currentUrgency = state.currentUrgency || 0.3;
+  }
 }
 
 // Latency chart
@@ -469,8 +734,26 @@ function drawLatencyChart() {
   var w = latencyCanvas.width, h = latencyCanvas.height;
   var data = state.latencyHistory;
   lCtx.clearRect(0,0,w,h);
-  if (data.length < 2) return;
+  if (data.length < 1) return;
   var maxVal = Math.max.apply(null, data.concat([500]));
+  if (data.length === 1) {
+    var v = data[0];
+    var y = h - (v / maxVal) * (h - 8);
+    lCtx.beginPath();
+    lCtx.moveTo(0, h);
+    lCtx.lineTo(w * 0.5, y);
+    lCtx.lineTo(w, h);
+    lCtx.closePath();
+    lCtx.fillStyle = 'rgba(79,142,247,0.15)';
+    lCtx.fill();
+    lCtx.beginPath();
+    lCtx.moveTo(0, y);
+    lCtx.lineTo(w, y);
+    lCtx.strokeStyle = '#4f8ef7';
+    lCtx.lineWidth = 2;
+    lCtx.stroke();
+    return;
+  }
   var step = w/(data.length-1);
   lCtx.beginPath(); lCtx.moveTo(0,h);
   data.forEach(function(v,i){ lCtx.lineTo(i*step, h-(v/maxVal)*(h-8)); });
@@ -533,22 +816,53 @@ async function syncStatus() {
       connectSSE();
       appendLog('sys', 'Reconnected to running pipeline');
     }
-    (data.recent_chunks || []).forEach(function(chunk){
+    // Replay all recent chunks to populate the dashboard
+    var chunks = data.recent_chunks || [];
+    chunks.forEach(function(chunk) {
       state.chunkCount++;
       var spk = chunk.speaker || 'Speaker 1';
-      state.speakerTime[spk] = (state.speakerTime[spk]||0) + ((chunk.end_time-chunk.start_time)||1.5);
-      if (chunk.latency) state.latencyHistory.push(chunk.latency*1000);
+      state.speakerTime[spk] = (state.speakerTime[spk] || 0) + ((chunk.end_time - chunk.start_time) || 1.5);
+      if (chunk.latency) state.latencyHistory.push(chunk.latency * 1000);
+      // Display AI data from each chunk
+      if (chunk.transcript) {
+        state._lastDisplayedTranscript = chunk.transcript;
+        state.transcriptionCount++;
+        updateTranscription(spk, chunk.transcript, chunk.normalized_text, chunk.language, chunk.transcription_confidence, chunk.is_code_mixed, chunk.dialect_notes);
+        dashTranscriptions.textContent = state.transcriptionCount;
+      }
+      if (chunk.language) {
+        var langDisplay = chunk.language.replace('_', ' ').toUpperCase();
+        statLanguage.textContent = langDisplay;
+        langBadge.textContent = langDisplay;
+        dashLanguage.textContent = langDisplay;
+        if (chunk.language_confidence) confBadge.textContent = (chunk.language_confidence * 100).toFixed(0) + '% conf';
+      }
+      if (chunk.emotion) {
+        state.currentEmotion = chunk.emotion;
+        state.currentUrgency = chunk.urgency_score || 0;
+        state.urgencyHistory.push(chunk.urgency_score || 0);
+        updateEmotionPanel(chunk.emotion, chunk.emotion_confidence, chunk.urgency_level, chunk.urgency_score, chunk.sentiment, chunk.emotion_trajectory, chunk.implicit_meaning);
+      }
+      if (chunk.intent) updateIntentPanel(chunk.intent, chunk.intent_confidence, chunk.entities, chunk.risk_level, chunk.missing_critical_info);
+      if (chunk.crisis_activated) triggerCrisisMode(chunk.crisis_type, chunk.crisis_severity, chunk.escalation_path, chunk.bypass_ai);
+      if (chunk.verification_action) updateVerification(chunk.verification_action, chunk.verification_statement, chunk.clarification_question);
+      if (chunk.tts_text) updateTTS(chunk.tts_text, chunk.tts_tone, chunk.tts_language || chunk.language);
+      updateDashboard(chunk.risk_level || 'low', chunk.crisis_activated, chunk.crisis_type, chunk.escalation_path, chunk.conversation_context);
+      if (chunk.start_time !== undefined) addTimelineItem(chunk.start_time, chunk.end_time, spk, chunk.quality || 'clean', chunk.latency || 0, chunk.language, chunk.emotion);
     });
     statChunks.textContent = state.chunkCount;
     updateSpeakerBars();
     if (state.latencyHistory.length) drawLatencyChart();
+    if (state.urgencyHistory.length) drawEmotionChart();
     if (data.pipeline && data.pipeline.avg_latency)
-      statLatency.textContent = (data.pipeline.avg_latency*1000).toFixed(0)+' ms';
+      statLatency.textContent = (data.pipeline.avg_latency * 1000).toFixed(0) + ' ms';
     if (data.storage && data.storage.manifest) updateStorageUI(data.storage.manifest);
     if (data.ai_context) {
       var ctx = data.ai_context;
-      if (ctx.dominant_emotion) updateEmotionPanel(ctx.dominant_emotion,0,ctx.current_urgency>0.6?'high':'low',ctx.current_urgency,'neutral',ctx.emotion_trajectory,'');
-      if (ctx.crisis_active) triggerCrisisMode(ctx.crisis_type,0,'',ctx.bypass_ai);
+      if (ctx.dominant_emotion) updateEmotionPanel(ctx.dominant_emotion, 0, ctx.current_urgency > 0.6 ? 'high' : 'low', ctx.current_urgency, 'neutral', ctx.emotion_trajectory, '');
+      if (ctx.crisis_active) triggerCrisisMode(ctx.crisis_type, 0, '', ctx.bypass_ai);
+      if (ctx.total_turns) dashTurns.textContent = ctx.total_turns;
+      if (ctx.languages_detected && ctx.languages_detected.length) dashLanguage.textContent = ctx.languages_detected.join(', ').toUpperCase();
     }
   } catch(e) { appendLog('sys', 'Cannot reach ECHO server - is it running?'); }
 }
@@ -567,5 +881,66 @@ setInterval(async function() {
     }
   } catch(e) {}
 }, 5000);
+
+// Agent Edit Mode
+var agentModeActive = false;
+document.getElementById('btn-agent-mode').addEventListener('click', function() {
+  if (!agentModeActive) {
+    var pin = prompt('Enter agent PIN to enable edit mode:');
+    if (pin !== '1234') { alert('Incorrect PIN'); return; }
+    agentModeActive = true;
+    document.getElementById('agent-edit-panel').classList.remove('hidden');
+    document.getElementById('btn-agent-mode').textContent = '🔓 Agent Mode ON';
+    document.getElementById('btn-agent-mode').style.background = '#2a7a2a';
+    appendLog('sys', 'Agent edit mode activated');
+  } else {
+    agentModeActive = false;
+    document.getElementById('agent-edit-panel').classList.add('hidden');
+    document.getElementById('btn-agent-mode').textContent = '🔐 Agent Edit Mode';
+    document.getElementById('btn-agent-mode').style.background = '';
+    appendLog('sys', 'Agent edit mode deactivated');
+  }
+});
+
+document.getElementById('btn-save-edit').addEventListener('click', function() {
+  var corrections = {
+    transcript: document.getElementById('edit-transcript').value,
+    intent: document.getElementById('edit-intent').value,
+    location: document.getElementById('edit-location').value,
+    risk: document.getElementById('edit-risk').value,
+    notes: document.getElementById('edit-notes').value,
+    saved_at: new Date().toISOString()
+  };
+  // Apply corrections to dashboard
+  if (corrections.intent) {
+    intentBadge.textContent = corrections.intent.replace(/_/g, ' ');
+    appendLog('sys', 'Agent corrected intent → ' + corrections.intent);
+  }
+  if (corrections.risk) {
+    riskBadge.textContent = corrections.risk;
+    riskBadge.className = 'risk-badge ' + corrections.risk;
+    dashRisk.textContent = corrections.risk;
+    appendLog('sys', 'Agent corrected risk → ' + corrections.risk);
+  }
+  if (corrections.location) {
+    appendLog('sys', 'Agent corrected location → ' + corrections.location);
+  }
+  if (corrections.transcript) {
+    appendLog('sys', 'Agent corrected transcript');
+  }
+  if (corrections.notes) {
+    appendLog('sys', 'Agent notes: ' + corrections.notes);
+  }
+  // Show saved confirmation
+  var msg = document.getElementById('edit-saved-msg');
+  msg.classList.remove('hidden');
+  setTimeout(function() { msg.classList.add('hidden'); }, 3000);
+  // POST corrections to backend for logging
+  fetch(API_BASE + '/agent_correction', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(corrections)
+  }).catch(function() {});
+});
 
 syncStatus();

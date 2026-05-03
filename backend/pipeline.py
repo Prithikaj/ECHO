@@ -17,6 +17,11 @@ import threading
 import time
 import queue
 import requests
+from dotenv import load_dotenv
+import os
+
+# Load .env from project root
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from audio_capture import AudioCapture
 from preprocessor import preprocess
@@ -45,7 +50,7 @@ class EchoPipeline:
         self,
         chunk_duration: float = 10.0,
         api_url: str = API_URL,
-        vad_threshold: float = 0.5,
+        vad_threshold: float = 0.3,
         save_audio: bool = True,
         enable_ai: bool = True,
     ):
@@ -100,6 +105,14 @@ class EchoPipeline:
         if self._intelligence and self._session_id:
             self._intelligence.start_session(self._session_id)
 
+        # Save session start to MongoDB
+        try:
+            from mongo_db import save_session_start
+            import threading
+            threading.Thread(target=save_session_start, args=(self._session_id,), daemon=True).start()
+        except Exception:
+            pass
+
         self._worker_thread = threading.Thread(
             target=self._process_loop, daemon=True, name="echo-pipeline"
         )
@@ -109,6 +122,13 @@ class EchoPipeline:
     def stop(self):
         self._running = False
         self._capture.stop()
+        
+        # Give in-flight AI processing time to complete (up to 30 seconds)
+        timeout = 30
+        start = time.time()
+        while (time.time() - start) < timeout and self._worker_thread.is_alive():
+            time.sleep(0.5)
+        
         if self._worker_thread:
             self._worker_thread.join(timeout=5)
 
@@ -121,7 +141,7 @@ class EchoPipeline:
             except Exception as e:
                 logger.warning(f"Post-call summary failed: {e}")
 
-        # Finalise storage session
+        # Finalise storage session AFTER all chunks are processed
         if self._storage and self._storage.is_active:
             manifest = self._storage.end_session()
             logger.info(f"Recordings saved → {self._storage.session_dir}")
@@ -149,6 +169,10 @@ class EchoPipeline:
                 logger.error(f"Preprocessing failed: {exc}")
                 continue
 
+            # Keep a clean copy of the full preprocessed audio for Gemini
+            # (before VAD trimming strips parts of it)
+            audio_for_gemini = audio.copy()
+
             # ── 2. VAD ────────────────────────────────────────────────────────
             audio, speech_intervals, has_speech = extract_speech(audio, sr, threshold=self.vad_threshold)
             if not has_speech:
@@ -169,7 +193,8 @@ class EchoPipeline:
 
             # ── 4. Encode & assess quality ────────────────────────────────────
             try:
-                b64_audio = audio_to_base64(audio, sr)
+                # Send full audio (not VAD-trimmed) to Gemini for better transcription
+                b64_audio = audio_to_base64(audio_for_gemini, sr)
                 quality = assess_quality(audio)
             except Exception as exc:
                 logger.error(f"Encoding failed: {exc}")

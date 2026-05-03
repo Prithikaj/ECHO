@@ -59,15 +59,18 @@ class ConversationContext:
     def add_turn(self, analysis: dict):
         """Add a processed turn to conversation history."""
         with self._lock:
+            tb = analysis.get("transcription")
+            if not isinstance(tb, dict):
+                tb = {}
             turn = {
                 "turn_id": self.total_turns + 1,
                 "timestamp": time.time(),
                 "speaker": analysis.get("speaker", "Unknown"),
-                "transcript": analysis.get("transcription", {}).get("transcript", ""),
-                "language": analysis.get("transcription", {}).get("language", "unknown"),
-                "emotion": analysis.get("emotion", {}),
-                "intent": analysis.get("intent", {}),
-                "crisis": analysis.get("crisis", {}),
+                "transcript": (tb.get("transcript") or tb.get("text") or "").strip(),
+                "language": tb.get("language") or "unknown",
+                "emotion": analysis.get("emotion") if isinstance(analysis.get("emotion"), dict) else {},
+                "intent": analysis.get("intent") if isinstance(analysis.get("intent"), dict) else {},
+                "crisis": analysis.get("crisis") if isinstance(analysis.get("crisis"), dict) else {},
             }
             self._history.append(turn)
             self.total_turns += 1
@@ -202,12 +205,28 @@ class IntelligenceEngine:
                 "error": str(e),
             }
 
-        transcript = analysis.get("transcription", {}).get("transcript", "")
-        language = analysis.get("transcription", {}).get("language", "english")
-        confidence = analysis.get("transcription", {}).get("confidence_score", 0.5)
-        emotion = analysis.get("emotion", {})
-        intent = analysis.get("intent", {})
-        crisis_data = analysis.get("crisis", {})
+        tblock = analysis.get("transcription")
+        if not isinstance(tblock, dict):
+            tblock = {}
+        transcript = (tblock.get("transcript") or tblock.get("text") or "").strip()
+        language = tblock.get("language") or "english"
+        primary_language = tblock.get("primary_language")
+        if tblock.get("is_code_mixed") and primary_language:
+            language = primary_language
+        if not language or language == "unknown":
+            language = "english"
+        confidence = tblock.get("confidence_score")
+        if confidence is None:
+            confidence = 0.5
+        emotion = analysis.get("emotion")
+        if not isinstance(emotion, dict):
+            emotion = {}
+        intent = analysis.get("intent")
+        if not isinstance(intent, dict):
+            intent = {}
+        crisis_data = analysis.get("crisis")
+        if not isinstance(crisis_data, dict):
+            crisis_data = {}
 
         # ── Step 2: Update conversation context ──────────────────────────────
         if ctx:
@@ -215,18 +234,38 @@ class IntelligenceEngine:
 
         # ── Step 3: Crisis check ──────────────────────────────────────────────
         crisis_result = {}
-        if emotion.get("urgency_score", 0) > 0.7 or emotion.get("is_crisis", False):
+        uq = float(emotion.get("urgency_score") or 0)
+        if uq > 0.7 or emotion.get("is_crisis", False):
             try:
                 crisis_result = detect_crisis(transcript, emotion, intent)
                 if crisis_result.get("crisis_activated") and ctx:
                     ctx.crisis_active = True
                     ctx.bypass_ai = crisis_result.get("bypass_ai", False)
+                    # ── Twilio WhatsApp alert ─────────────────────────────────
+                    try:
+                        from twilio_helpline import send_whatsapp_to_all_relevant
+                        ents = intent.get("entities", {})
+                        location = ents.get("location", "") or ""
+                        wa_results = send_whatsapp_to_all_relevant(
+                            crisis_type=crisis_result.get("crisis_type", "unknown"),
+                            escalation_path=crisis_result.get("escalation_path", "police"),
+                            location=location,
+                            transcript=transcript[:150],
+                            session_id=ctx.session_id,
+                            emotion=emotion.get("primary_emotion", "unknown"),
+                            urgency_score=emotion.get("urgency_score", 0.0),
+                            entities=ents,
+                        )
+                        logger.info(f"WhatsApp alerts: {wa_results}")
+                    except Exception as te:
+                        logger.warning(f"WhatsApp alert skipped: {te}")
             except Exception as e:
                 logger.warning(f"Crisis detection failed: {e}")
 
         # ── Step 4: Verification loop ─────────────────────────────────────────
         verification = {}
-        if transcript and not crisis_data.get("crisis_activated") and not (crisis_result.get("bypass_ai")):
+        assistant_response = (analysis.get("assistant_response") or "").strip()
+        if transcript:
             try:
                 verification = generate_verification(
                     transcript=transcript,
@@ -237,24 +276,46 @@ class IntelligenceEngine:
                 )
             except Exception as e:
                 logger.warning(f"Verification generation failed: {e}")
+        elif assistant_response:
+            verification = {
+                "action": "clarify",
+                "verification_statement": assistant_response,
+                "clarification_question": "",
+                "tts_text": assistant_response,
+            }
 
+        if not isinstance(verification, dict):
+            verification = {}
         # ── Step 5: TTS response ──────────────────────────────────────────────
         tts = {}
-        if verification.get("tts_text") or crisis_result.get("immediate_response"):
-            tts_message = (
-                crisis_result.get("immediate_response")
-                or verification.get("tts_text", "")
-            )
+        tts_message = (
+            crisis_result.get("immediate_response")
+            or assistant_response
+            or verification.get("tts_text", "")
+        )
+        # If still no TTS message but we have a transcript, generate a default response
+        if not tts_message and transcript:
+            tts_message = f"I heard you. {verification.get('verification_statement', 'Can you please provide more details?')}"
+
+        if tts_message:
+            # Don't call Gemini for TTS if possible - use cached response
             try:
-                tts = generate_tts_response(
-                    message=tts_message,
-                    language=language,
-                    emotion_context=emotion.get("primary_emotion", "neutral"),
-                    is_crisis=bool(crisis_result.get("crisis_activated")),
-                )
+                # Check if we already have a cached TTS response for this exact message
+                # to avoid redundant Gemini API calls within the same crisis event
+                if "immediate_response" in crisis_result:  # Already from crisis detection
+                    tts = {"tts_text": tts_message, "language": language, "tone": "urgent"}
+                else:
+                    tts = generate_tts_response(
+                        message=tts_message,
+                        language=language,
+                        emotion_context=emotion.get("primary_emotion", "neutral"),
+                        is_crisis=bool(crisis_result.get("crisis_activated")),
+                    )
+                    if not isinstance(tts, dict) or not (str(tts.get("tts_text") or "").strip()):
+                        tts = {"tts_text": tts_message, "language": language, "tone": "calm"}
             except Exception as e:
                 logger.warning(f"TTS generation failed: {e}")
-                tts = {"tts_text": tts_message, "language": language}
+                tts = {"tts_text": tts_message, "language": language, "tone": "calm"}
 
         # ── Step 6: Emotion trajectory ────────────────────────────────────────
         emotion_trajectory = ctx.get_emotion_trajectory() if ctx else "stable"
@@ -262,32 +323,39 @@ class IntelligenceEngine:
         # ── Assemble enriched result ──────────────────────────────────────────
         ai_latency = round(time.perf_counter() - start_time, 3)
 
+        ents = intent.get("entities")
+        if not isinstance(ents, dict):
+            ents = {}
+        missing = intent.get("missing_critical_info")
+        if not isinstance(missing, list):
+            missing = []
+
         enriched = {
             "chunk_id": chunk_id,
             "speaker": speaker,
             # Transcription
             "transcript": transcript,
             "language": language,
-            "language_confidence": analysis.get("transcription", {}).get("language_confidence", 0),
-            "normalized_text": analysis.get("transcription", {}).get("normalized_text", transcript),
-            "transcription_confidence": confidence,
-            "dialect_notes": analysis.get("transcription", {}).get("dialect_notes", ""),
-            "is_code_mixed": analysis.get("transcription", {}).get("is_code_mixed", False),
-            # Emotion
-            "emotion": emotion.get("primary_emotion", "neutral"),
-            "emotion_confidence": emotion.get("emotion_confidence", 0),
-            "urgency_level": emotion.get("urgency_level", "low"),
-            "urgency_score": emotion.get("urgency_score", 0),
-            "sentiment": emotion.get("sentiment", "neutral"),
-            "implicit_meaning": emotion.get("implicit_meaning", ""),
+            "language_confidence": float(tblock.get("language_confidence") or 0),
+            "normalized_text": (tblock.get("normalized_text") or transcript or "").strip(),
+            "transcription_confidence": float(confidence or 0),
+            "dialect_notes": (tblock.get("dialect_notes") or "").strip(),
+            "is_code_mixed": bool(tblock.get("is_code_mixed", False)),
+            # Emotion (JSON null → real defaults so the frontend always gets strings/numbers)
+            "emotion": emotion.get("primary_emotion") or "neutral",
+            "emotion_confidence": float(emotion.get("emotion_confidence") or 0),
+            "urgency_level": emotion.get("urgency_level") or "low",
+            "urgency_score": float(emotion.get("urgency_score") or 0),
+            "sentiment": emotion.get("sentiment") or "neutral",
+            "implicit_meaning": (emotion.get("implicit_meaning") or "").strip(),
             "emotion_trajectory": emotion_trajectory,
             # Intent
-            "intent": intent.get("intent", "unknown"),
-            "intent_confidence": intent.get("intent_confidence", 0),
-            "entities": intent.get("entities", {}),
-            "risk_level": intent.get("risk_level", "low"),
-            "requires_immediate_action": intent.get("requires_immediate_action", False),
-            "missing_critical_info": intent.get("missing_critical_info", []),
+            "intent": intent.get("intent") or "unknown",
+            "intent_confidence": float(intent.get("intent_confidence") or 0),
+            "entities": ents,
+            "risk_level": str(intent.get("risk_level") or "low").lower(),
+            "requires_immediate_action": bool(intent.get("requires_immediate_action", False)),
+            "missing_critical_info": missing,
             # Crisis
             "crisis_activated": crisis_result.get("crisis_activated", False),
             "crisis_type": crisis_result.get("crisis_type", "none"),

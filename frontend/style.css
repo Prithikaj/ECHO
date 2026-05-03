@@ -2,23 +2,23 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:          #0a0c12;
-  --surface:     #12151f;
-  --surface2:    #1a1e2e;
-  --surface3:    #222840;
-  --border:      #2a3050;
-  --accent:      #4f8ef7;
-  --accent2:     #a259ff;
-  --green:       #3ecf8e;
-  --red:         #f76f6f;
-  --yellow:      #f7c948;
-  --orange:      #f79a4f;
-  --teal:        #4fd1c5;
-  --text:        #e2e8f0;
-  --text-muted:  #7a8499;
-  --s1-color:    #4f8ef7;
-  --s2-color:    #a259ff;
-  --radius:      10px;
+  --bg:          #101827;
+  --surface:     #17213a;
+  --surface2:    #1f2b4f;
+  --surface3:    #24335f;
+  --border:      rgba(255,255,255,0.08);
+  --accent:      #5aa8ff;
+  --accent2:     #b36cff;
+  --green:       #4dd69e;
+  --red:         #ff6b70;
+  --yellow:      #f6d95b;
+  --orange:      #ffa05f;
+  --teal:        #5ae1d6;
+  --text:        #eef2ff;
+  --text-muted:  #97a5c8;
+  --s1-color:    #5aa8ff;
+  --s2-color:    #b36cff;
+  --radius:      12px;
   --font:        'Segoe UI', system-ui, sans-serif;
 
   /* Emotion colors */
@@ -40,7 +40,8 @@
 
 html, body {
   min-height: 100%;
-  background: var(--bg);
+  background: radial-gradient(circle at top left, rgba(90,168,255,0.12), transparent 28%),
+              linear-gradient(180deg, #121a2e 0%, #0d1321 100%);
   color: var(--text);
   font-family: var(--font);
   font-size: 14px;
@@ -201,6 +202,7 @@ header {
 .btn-start    { background: var(--green);  color: #0d1a12; }
 .btn-stop     { background: var(--red);    color: #1a0d0d; }
 .btn-override { background: var(--orange); color: #1a0d0d; width: 100%; margin-top: 10px; }
+.btn-human-connect { background: var(--accent); color: #fff; width: 100%; margin-top: 10px; }
 
 /* ── Main Grid ───────────────────────────────────────────────────────────── */
 .grid {
@@ -214,10 +216,17 @@ header {
 
 /* ── Cards ───────────────────────────────────────────────────────────────── */
 .card {
-  background: var(--surface);
+  background: rgba(22, 34, 65, 0.96);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(10px);
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(90,168,255,0.35);
 }
 
 .card h2 {
@@ -825,3 +834,53 @@ header {
   .col-right { grid-column: 1; display: flex; flex-direction: column; }
   .bottom-row { grid-template-columns: 1fr; }
 }
+
+/* ── TTS Speak Button ─────────────────────────────────────────────────────── */
+.btn-speak {
+  margin-top: 6px;
+  padding: 4px 12px;
+  background: #2a5298;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btn-speak:hover { background: #3a6bc8; }
+
+/* ── Agent Edit Mode ──────────────────────────────────────────────────────── */
+.btn-agent-mode {
+  margin-top: 8px;
+  width: 100%;
+  background: #4a3a6a;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn-agent-mode:hover { background: #6a4a9a; }
+.agent-edit-panel {
+  margin-top: 12px;
+  background: #1a1f2e;
+  border: 1px solid #3a4060;
+  border-radius: 8px;
+  padding: 12px;
+}
+.edit-field { margin-bottom: 10px; }
+.edit-field label { display: block; font-size: 11px; color: #8a9ab5; margin-bottom: 4px; text-transform: uppercase; }
+.edit-field textarea, .edit-field input, .edit-field select {
+  width: 100%; background: #0d1117; color: #e0e6f0;
+  border: 1px solid #3a4060; border-radius: 4px;
+  padding: 6px 8px; font-size: 13px; box-sizing: border-box;
+}
+.edit-field select option { background: #0d1117; }
+.btn-save-edit {
+  width: 100%; background: #1a5a1a; color: #fff;
+  border: none; border-radius: 6px; padding: 8px;
+  cursor: pointer; font-size: 13px; margin-top: 4px;
+}
+.btn-save-edit:hover { background: #2a7a2a; }
+.edit-saved-msg { color: #3ecf8e; font-size: 13px; margin-top: 6px; text-align: center; }
+.hidden { display: none; }

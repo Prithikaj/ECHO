@@ -23,7 +23,11 @@ import threading
 import time
 from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
+from dotenv import load_dotenv
 from utils import get_logger
+
+# Load .env from project root (one level up from backend/)
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 logger = get_logger("app")
 
@@ -99,8 +103,19 @@ def receive_audio_chunk():
         f"latency={data['latency']}s | quality={data['quality']}{ai_info}"
     )
 
-    # Broadcast to SSE clients
+    # Broadcast full enriched chunk to SSE clients (NOT just chunk metadata, but ALL enriched AI fields)
     _push_event({"type": "chunk", **log_entry})
+
+    # Save chunk to MongoDB (non-blocking, fire and forget)
+    try:
+        from mongo_db import save_chunk
+        session_id = ""
+        if _pipeline and hasattr(_pipeline, "_session_id"):
+            session_id = _pipeline._session_id
+        import threading
+        threading.Thread(target=save_chunk, args=(session_id, log_entry), daemon=True).start()
+    except Exception:
+        pass
 
     # If crisis detected, push a separate high-priority crisis event
     if data.get("crisis_activated"):
@@ -112,6 +127,7 @@ def receive_audio_chunk():
             "bypass_ai": data.get("bypass_ai", False),
             "escalation_path": data.get("escalation_path", ""),
             "immediate_response": data.get("tts_text", ""),
+            "tts_language": data.get("tts_language") or data.get("language", "english"),
             "timestamp": log_entry["received_at"],
         })
 
@@ -198,6 +214,18 @@ def pipeline_stop():
     post_call = _pipeline.stop()
     _push_event({"type": "pipeline_status", "status": "stopped"})
     _push_event({"type": "post_call_summary", "summary": post_call})
+
+    # Save session end to MongoDB
+    try:
+        from mongo_db import save_session_end
+        import threading
+        threading.Thread(
+            target=save_session_end,
+            args=(_pipeline._session_id, post_call, _pipeline.get_stats()),
+            daemon=True
+        ).start()
+    except Exception:
+        pass
     return jsonify({
         "status": "stopped",
         "stats": _pipeline.get_stats(),
@@ -275,6 +303,75 @@ def get_manifest(session_id):
 
     with open(manifest_path, "r", encoding="utf-8") as f:
         return jsonify(json.load(f))
+
+
+@app.route("/agent_correction", methods=["POST"])
+def agent_correction():
+    """Log agent corrections to a file for audit trail."""
+    data = request.get_json(silent=True) or {}
+    data["logged_at"] = time.time()
+    corrections_file = os.path.join(os.path.dirname(__file__), "..", "recordings", "agent_corrections.jsonl")
+    os.makedirs(os.path.dirname(corrections_file), exist_ok=True)
+    try:
+        with open(corrections_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data) + "\n")
+        logger.info(f"Agent correction logged: intent={data.get('intent')} risk={data.get('risk')}")
+        # Also save to MongoDB
+        try:
+            from mongo_db import save_correction
+            import threading
+            threading.Thread(target=save_correction, args=(data,), daemon=True).start()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Failed to log correction: {e}")
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/connect_human", methods=["POST"])
+def connect_human():
+    """Request a human professional connection when crisis needs human takeover."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id") or (getattr(_pipeline, "_session_id", "") if _pipeline else "")
+    last_chunk = _chunk_log[-1] if _chunk_log else {}
+    crisis_type = data.get("crisis_type") or last_chunk.get("crisis_type") or "life_threat"
+    location = data.get("location") or ""
+    transcript = data.get("transcript") or last_chunk.get("transcript") or ""
+    urgency_score = float(data.get("urgency_score") or last_chunk.get("urgency_score") or 0.0)
+    entities = data.get("entities") or last_chunk.get("entities") or {}
+
+    result = {"status": "not_configured", "message": "Human connection not sent."}
+    try:
+        from twilio_helpline import send_whatsapp_alert
+        send_result = send_whatsapp_alert(
+            escalation_path="human_agent",
+            crisis_type=crisis_type,
+            location=location,
+            transcript=transcript,
+            session_id=session_id or "unknown_session",
+            emotion=data.get("emotion", last_chunk.get("emotion", "unknown")),
+            urgency_score=urgency_score,
+            entities=entities,
+        )
+        result = {"status": "ok", "details": send_result}
+        _push_event({
+            "type": "human_connection",
+            "success": True,
+            "message": "Human professional notified.",
+            "details": send_result,
+            "timestamp": time.time(),
+        })
+    except Exception as e:
+        result = {"status": "error", "reason": str(e)}
+        _push_event({
+            "type": "human_connection",
+            "success": False,
+            "message": "Human professional connection failed.",
+            "reason": str(e),
+            "timestamp": time.time(),
+        })
+
+    return jsonify(result), 200
 
 
 @app.route("/health", methods=["GET"])

@@ -25,23 +25,23 @@ def resample(audio: np.ndarray, orig_sr: int, target_sr: int = TARGET_SR) -> np.
 
 def reduce_noise(audio: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
     """
-    Apply spectral noise reduction via noisereduce.
-    Uses the first 0.5 s as a noise profile when the clip is long enough.
+    Apply very gentle noise reduction — just enough for VAD, not enough to destroy speech.
+    prop_decrease=0.2 removes only 20% of detected noise, preserving speech for Gemini.
     """
     try:
-        noise_clip_len = int(sr * 0.5)
-        if len(audio) > noise_clip_len * 2:
-            noise_clip = audio[:noise_clip_len]
-            reduced = nr.reduce_noise(y=audio, sr=sr, y_noise=noise_clip, prop_decrease=0.75)
-        else:
-            reduced = nr.reduce_noise(y=audio, sr=sr, prop_decrease=0.75)
+        reduced = nr.reduce_noise(
+            y=audio,
+            sr=sr,
+            stationary=True,
+            prop_decrease=0.2,
+        )
         return reduced.astype(np.float32)
     except Exception as exc:
         logger.warning(f"Noise reduction failed ({exc}), returning original audio")
         return audio
 
 
-def normalize(audio: np.ndarray, target_peak: float = 0.9) -> np.ndarray:
+def normalize(audio: np.ndarray, target_peak: float = 0.95) -> np.ndarray:
     """Peak-normalize audio so the loudest sample reaches target_peak."""
     peak = np.max(np.abs(audio))
     if peak < 1e-6:

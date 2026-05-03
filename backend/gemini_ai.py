@@ -17,19 +17,29 @@ import base64
 import threading
 import time
 from typing import Optional
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from utils import get_logger
 
+# Load .env from project root (one level up from backend/)
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
 logger = get_logger("gemini_ai")
 
 # ── API Key ────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set. Check your .env file.")
 MODEL_NAME = "gemini-2.5-flash"
 
 # ── Client (new SDK uses a client object, not a global configure) ──────────────
 _client = None
 _client_lock = threading.Lock()
+_response_cache = {}  # Simple cache for identical requests
+_last_api_call = 0
+_api_call_lock = threading.Lock()
+_api_rate_limit_seconds = 0  # No enforced delay by default; use new key quota to process normally
 
 
 def _get_client() -> genai.Client:
@@ -41,12 +51,33 @@ def _get_client() -> genai.Client:
     return _client
 
 
-# ── Core JSON caller ───────────────────────────────────────────────────────────
-def _call_gemini(prompt: str, audio_b64: Optional[str] = None, retries: int = 2) -> dict:
+def _normalize_gemini_keys(obj):
+    """Lower-case all dict keys (Gemini sometimes returns different casing)."""
+    if isinstance(obj, dict):
+        return {str(k).lower(): _normalize_gemini_keys(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_normalize_gemini_keys(x) for x in obj]
+    return obj
+
+
+def _as_dict(obj) -> dict:
+    return obj if isinstance(obj, dict) else {}
+
+
+# ── Core JSON caller ───────────────────────────────────────────────────────
+def _call_gemini(prompt: str, audio_b64: Optional[str] = None, retries: int = 2, cache_key: Optional[str] = None) -> dict:
     """
     Call Gemini and parse JSON response.
     Optionally attach base64 WAV audio as inline data.
+    Implements rate limiting and response caching.
     """
+    global _last_api_call, _api_rate_limit_seconds
+    
+    # Check cache first
+    if cache_key and cache_key in _response_cache:
+        logger.debug(f"Cache hit for key: {cache_key[:50]}...")
+        return _response_cache[cache_key]
+    
     client = _get_client()
 
     # Build content parts
@@ -67,11 +98,23 @@ def _call_gemini(prompt: str, audio_b64: Optional[str] = None, retries: int = 2)
         response_mime_type="application/json",
     )
 
+    # Multimodal requests must use a user Content wrapper (parts-only list is unreliable).
+    user_message = types.Content(role="user", parts=parts)
+
     for attempt in range(retries + 1):
         try:
+            # Rate limiting - wait between calls
+            with _api_call_lock:
+                elapsed = time.time() - _last_api_call
+                if elapsed < _api_rate_limit_seconds:
+                    wait_time = _api_rate_limit_seconds - elapsed
+                    logger.debug(f"Rate limit: waiting {wait_time:.1f}s")
+                    time.sleep(wait_time)
+                _last_api_call = time.time()
+            
             response = client.models.generate_content(
                 model=MODEL_NAME,
-                contents=parts,
+                contents=[user_message],
                 config=config,
             )
             text = response.text.strip()
@@ -80,16 +123,37 @@ def _call_gemini(prompt: str, audio_b64: Optional[str] = None, retries: int = 2)
                 text = text.split("```")[1]
                 if text.startswith("json"):
                     text = text[4:]
-            return json.loads(text)
+            result = json.loads(text)
+            result = _normalize_gemini_keys(result)
+            
+            # Cache successful response
+            if cache_key:
+                _response_cache[cache_key] = result
+                logger.debug(f"Cached response for key: {cache_key[:50]}...")
+            
+            return result
         except json.JSONDecodeError as e:
             logger.warning(f"Gemini JSON parse error (attempt {attempt+1}): {e}")
             if attempt == retries:
                 return {"error": "json_parse_failed", "raw": getattr(response, "text", "")[:200]}
         except Exception as e:
-            logger.error(f"Gemini API error (attempt {attempt+1}): {e}")
-            if attempt == retries:
-                return {"error": str(e)}
-            time.sleep(1.5 * (attempt + 1))
+            error_str = str(e)
+            # Check if it's a quota error
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                logger.error(f"Gemini API quota exceeded (attempt {attempt+1}): {error_str[:100]}")
+                # Increase rate limiting (first bump from 0 → 1s, then backoff up to 10s)
+                base = _api_rate_limit_seconds if _api_rate_limit_seconds > 0 else 0.5
+                _api_rate_limit_seconds = min(10.0, max(1.0, base * 2))
+                logger.warning(f"Increased rate limit to {_api_rate_limit_seconds}s")
+                if attempt == retries:
+                    return {"error": "quota_exceeded", "message": "Free tier quota limit exceeded. Please try again later."}
+                # Wait longer before retry on quota
+                time.sleep(5.0 * (attempt + 1))
+            else:
+                logger.error(f"Gemini API error (attempt {attempt+1}): {error_str[:100]}")
+                if attempt == retries:
+                    return {"error": str(e)[:200]}
+                time.sleep(1.5 * (attempt + 1))
 
     return {"error": "max_retries_exceeded"}
 
@@ -101,11 +165,13 @@ def _call_gemini(prompt: str, audio_b64: Optional[str] = None, retries: int = 2)
 def transcribe_and_detect(audio_b64: str, speaker: str = "Speaker 1") -> dict:
     """
     Transcribe audio and detect language in one Gemini call.
+    For code-mixed speech, returns the PRIMARY language detected.
 
     Returns:
     {
       "transcript": "...",
       "language": "kannada|hindi|english|code_mixed",
+      "primary_language": "hindi|kannada|english (if code_mixed)",
       "language_confidence": 0.95,
       "dialect_notes": "...",
       "normalized_text": "...",
@@ -120,6 +186,7 @@ Listen to this audio and return a JSON object with:
 {{
   "transcript": "exact transcription of what was said",
   "language": "one of: kannada, hindi, english, code_mixed, unknown",
+  "primary_language": "if code_mixed, which language dominates (hindi/kannada/english)? Otherwise same as language",
   "language_confidence": 0.0-1.0,
   "dialect_notes": "any dialect or accent observations (e.g. North Karnataka Kannada, Hyderabadi Hindi)",
   "normalized_text": "standardized version removing slang/dialect, in the detected language",
@@ -129,10 +196,14 @@ Listen to this audio and return a JSON object with:
   "code_mix_languages": ["list of languages mixed if code_mixed"]
 }}
 
-Handle Kannada, Hindi, English, and code-mixed speech. If audio is silent or unclear, set transcript to "" and confidence_score to 0.0."""
+Handle Kannada, Hindi, English, and code-mixed speech. If audio is silent or unclear, set transcript to "" and confidence_score to 0.0.
+**IMPORTANT**: Always detect and return the PRIMARY language, even in code-mixed speech. Callers in India often mix languages, but one typically dominates."""
 
     result = _call_gemini(prompt, audio_b64=audio_b64)
     result["speaker"] = speaker
+    # Use primary_language if code_mixed, otherwise use language
+    if result.get("is_code_mixed") and result.get("primary_language"):
+        result["language"] = result["primary_language"]
     return result
 
 
@@ -386,29 +457,38 @@ Analyze this audio from {speaker}.
 
 {"Previous conversation context:" + chr(10) + history_text if history_text else ""}
 
-Return a comprehensive JSON analysis:
+IMPORTANT language detection rules:
+- If the speaker is using Hindi words (e.g. madad, bachao, aag, police, ghar, koi, maar, help karo), set language to "hindi"
+- If the speaker is using Kannada words (e.g. sahaya, banni, hogbedi, illi, avaru), set language to "kannada"
+- If mixing Hindi and English, set language to "code_mixed"
+- Also set "primary_language" to the dominant language when code_mixed is used
+- Only set language to "english" if the speaker is speaking purely in English
+- Never return the instruction text as the language value
+
+Return a comprehensive JSON analysis with these EXACT field names:
 {{
   "transcription": {{
-    "transcript": "exact text spoken",
-    "language": "kannada|hindi|english|code_mixed|unknown",
-    "language_confidence": 0.0-1.0,
-    "normalized_text": "standardized version",
-    "confidence_score": 0.0-1.0,
-    "dialect_notes": "any dialect observations",
-    "is_code_mixed": true/false
+    "transcript": "exact text spoken by the caller",
+    "language": "hindi",
+    "primary_language": "hindi|kannada|english",
+    "language_confidence": 0.95,
+    "normalized_text": "standardized version of transcript",
+    "confidence_score": 0.9,
+    "dialect_notes": "e.g. Standard Hindi, North Karnataka Kannada",
+    "is_code_mixed": false
   }},
   "emotion": {{
-    "primary_emotion": "fear|panic|anger|confusion|calm|distress|sadness|neutral",
-    "emotion_confidence": 0.0-1.0,
-    "urgency_level": "critical|high|medium|low",
-    "urgency_score": 0.0-1.0,
-    "is_crisis": true/false,
+    "primary_emotion": "neutral",
+    "emotion_confidence": 0.8,
+    "urgency_level": "low",
+    "urgency_score": 0.1,
+    "is_crisis": false,
     "crisis_indicators": [],
-    "implicit_meaning": "hidden meaning if any"
+    "implicit_meaning": ""
   }},
   "intent": {{
-    "intent": "emergency|complaint|inquiry|report_crime|request_help|harassment_report|medical_emergency|fire_emergency|accident_report|domestic_violence|missing_person|other",
-    "intent_confidence": 0.0-1.0,
+    "intent": "inquiry",
+    "intent_confidence": 0.7,
     "entities": {{
       "location": null,
       "area_landmark": null,
@@ -418,7 +498,7 @@ Return a comprehensive JSON analysis:
       "names": [],
       "phone_numbers": []
     }},
-    "risk_level": "critical|high|medium|low",
+    "risk_level": "low",
     "requires_immediate_action": false,
     "missing_critical_info": []
   }},
@@ -428,14 +508,76 @@ Return a comprehensive JSON analysis:
     "crisis_severity": 0,
     "bypass_ai": false,
     "silent_assist_mode": false
-  }}
+  }},
+  "assistant_response": "A short empathetic spoken response in the caller's language, suitable for the next turn."
 }}
 
-Handle Kannada, Hindi, English, and code-mixed speech.
-Consider Indian cultural context for phrase interpretation.
-If audio is silent/unclear, set transcript to "" and all confidence scores to 0."""
+Replace the example values above with the actual analysis of the audio.
+The "language" field must be one of: hindi, kannada, english, code_mixed, unknown
+
+CRITICAL: You are given the raw WAV audio. Listen to it. The "transcription.transcript" field MUST
+contain a verbatim transcript of all speech you hear in the audio. If you hear any speech at all,
+do not leave "transcript" empty. Only use an empty transcript if the clip is silence or pure noise.
+If speech is unclear, write your best-effort transcript and lower confidence_score accordingly."""
 
     result = _call_gemini(prompt, audio_b64=audio_b64)
+    if result.get("error") and "transcription" not in result:
+        err = result.get("error", "unknown")
+        logger.error("full_analysis Gemini failure: %s", err)
+        return {
+            "error": err,
+            "message": result.get("message", ""),
+            "transcription": {
+                "transcript": "",
+                "language": "unknown",
+                "confidence_score": 0.0,
+                "normalized_text": "",
+                "dialect_notes": "",
+                "is_code_mixed": False,
+            },
+            "emotion": {
+                "primary_emotion": "neutral",
+                "urgency_score": 0.0,
+                "urgency_level": "low",
+                "is_crisis": False,
+            },
+            "intent": {
+                "intent": "unknown",
+                "risk_level": "low",
+                "entities": {},
+            },
+            "crisis": {"crisis_activated": False},
+            "assistant_response": "",
+            "speaker": speaker,
+            "analyzed_at": time.time(),
+        }
+
+    trec = _as_dict(result.get("transcription"))
+    result["transcription"] = trec
+    tr = (trec.get("transcript") or trec.get("text") or "").strip()
+    if not tr:
+        logger.warning("full_analysis: empty transcript; running transcribe_and_detect fallback")
+        td = transcribe_and_detect(audio_b64, speaker)
+        if not td.get("error"):
+            fb = (td.get("transcript") or "").strip()
+            if fb:
+                trec["transcript"] = fb
+                for k in (
+                    "language",
+                    "primary_language",
+                    "normalized_text",
+                    "confidence_score",
+                    "language_confidence",
+                    "dialect_notes",
+                    "is_code_mixed",
+                    "word_confidences",
+                ):
+                    if k in td and td[k] is not None:
+                        trec.setdefault(k, td[k])
+                logger.info("Fallback transcription recovered %d characters", len(fb))
+        else:
+            logger.warning("transcribe_and_detect fallback failed: %s", td.get("error"))
+
     result["speaker"] = speaker
     result["analyzed_at"] = time.time()
     return result

@@ -207,6 +207,51 @@
         </div>
         <div class="agent-override">
           <button class="btn btn-override" id="btn-override">⚡ Override to Human Agent</button>
+          <button class="btn btn-human-connect" id="btn-connect-human">🤝 Connect Human Professional</button>
+          <button class="btn btn-agent-mode" id="btn-agent-mode">🔐 Agent Edit Mode</button>
+        </div>
+        <div id="agent-edit-panel" class="agent-edit-panel hidden">
+          <div class="edit-field">
+            <label>Transcript Correction</label>
+            <textarea id="edit-transcript" rows="3" placeholder="Edit transcript..."></textarea>
+          </div>
+          <div class="edit-field">
+            <label>Intent Override</label>
+            <select id="edit-intent">
+              <option value="">-- keep AI value --</option>
+              <option value="emergency">Emergency</option>
+              <option value="medical_emergency">Medical Emergency</option>
+              <option value="fire_emergency">Fire Emergency</option>
+              <option value="accident_report">Accident Report</option>
+              <option value="report_crime">Report Crime</option>
+              <option value="domestic_violence">Domestic Violence</option>
+              <option value="missing_person">Missing Person</option>
+              <option value="harassment_report">Harassment Report</option>
+              <option value="complaint">Complaint</option>
+              <option value="inquiry">Inquiry</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="edit-field">
+            <label>Location Correction</label>
+            <input type="text" id="edit-location" placeholder="Correct location if wrong..." />
+          </div>
+          <div class="edit-field">
+            <label>Risk Level Override</label>
+            <select id="edit-risk">
+              <option value="">-- keep AI value --</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div class="edit-field">
+            <label>Agent Notes</label>
+            <textarea id="edit-notes" rows="2" placeholder="Add notes for this call..."></textarea>
+          </div>
+          <button class="btn btn-save-edit" id="btn-save-edit">💾 Save Corrections</button>
+          <div id="edit-saved-msg" class="edit-saved-msg hidden">✅ Corrections saved</div>
         </div>
       </section>
 

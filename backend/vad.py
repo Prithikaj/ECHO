@@ -40,6 +40,7 @@ def _load_silero():
                 force_reload=False,
                 onnx=False,
                 verbose=False,
+                trust_repo=True,
             )
             _silero_model = model
             _silero_utils  = utils
@@ -173,7 +174,7 @@ def extract_speech(
     audio: np.ndarray,
     sr: int = TARGET_SR,
     threshold: float = 0.5,
-    min_voiced_ratio: float = 0.05,
+    min_voiced_ratio: float = 0.01,
 ) -> tuple[np.ndarray, list[dict], bool]:
     """
     Cut out ONLY the voiced segments from audio.
@@ -230,7 +231,7 @@ def contains_speech(
     audio: np.ndarray,
     sr: int = TARGET_SR,
     threshold: float = 0.5,
-    min_voiced_ratio: float = 0.05,
+    min_voiced_ratio: float = 0.01,
 ) -> bool:
     """Convenience wrapper — returns True if the chunk contains enough speech."""
     _, _, has_speech = extract_speech(audio, sr, threshold, min_voiced_ratio)
